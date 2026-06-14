@@ -53,6 +53,7 @@ void hk_container_ps(void);
 hk_container_t *hk_container_get(int id);
 
 /*
+ * Find container processes that have exited, collect their exit status with waitpid(), remove zombies, and update their state from RUNNING to STOPPED
  * Non-blocking reap of any containers that have exited.
  * Calls waitpid(WNOHANG) internally.
  * Call this before ps() to get accurate state.
