@@ -1,12 +1,9 @@
 /*
  * daemon.c — the hollowkernel background daemon
  *
- * Owns the container table. Listens on a Unix domain socket.
- * Serves one client at a time in a simple accept() loop.
- *
- * Architecture:
- *   CLI client  →  connect()  →  send hk_request_t
- *                               ← recv hk_response_t  ← daemon
+ * Two threads:
+ *   1. accept() loop  — serves CLI client commands
+ *   2. scheduler loop — fires hk_scheduler_tick() every HK_TICK_MS
  */
 
 #include <stdio.h>
@@ -15,29 +12,44 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <pthread.h> /* pthread_create(), pthread_t          */
 
-/* socket API */
-#include <sys/socket.h> /* socket(), bind(), listen(), accept() */
-#include <sys/un.h>     /* struct sockaddr_un — Unix sockets    */
-#include <sys/stat.h>   /* stat() — check if socket exists      */
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/stat.h>
 
 #include "hk_daemon.h"
 #include "hk_container.h"
+#include "hk_scheduler.h"
 #include "hk_socket.h"
 #include "hk_log.h"
 
-/* ── internal helpers */
+/* ── scheduler thread ────────────────────────────────────────
+ *
+ * Runs in background, fires a tick every HK_TICK_MS milliseconds.
+ * Completely independent of the accept() loop.
+ * ─────────────────────────────────────────────────────────── */
+static void *_scheduler_thread(void *arg)
+{
+    (void)arg;
 
-/*
- * Build the socket, bind it to HK_SOCKET_PATH, and start listening.
- * Returns the listening fd on success, -1 on failure.
- */
+    while (1)
+    {
+        /*
+         * usleep takes microseconds.
+         * HK_TICK_MS is milliseconds → multiply by 1000.
+         */
+        usleep(HK_TICK_MS * 1000);
+        hk_scheduler_tick();
+    }
+
+    return NULL;
+}
+
+/* ── socket setup ────────────────────────────────────────────── */
+
 static int _setup_socket(void)
 {
-    /*
-     * AF_UNIX  = Unix domain socket (local IPC, not network)
-     * SOCK_STREAM = reliable, ordered, connection-based (like TCP)
-     */
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0)
     {
@@ -45,16 +57,11 @@ static int _setup_socket(void)
         return -1;
     }
 
-    /*
-     * sockaddr_un is the address struct for Unix sockets.
-     * sun_path is just the file path on disk.
-     */
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, HK_SOCKET_PATH, sizeof(addr.sun_path) - 1);
 
-    /* Remove stale socket file if it exists from a previous run */
     unlink(HK_SOCKET_PATH);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
@@ -64,11 +71,6 @@ static int _setup_socket(void)
         return -1;
     }
 
-    /*
-     * listen() marks this socket as passive — ready to accept.
-     * The second arg (5) is the backlog — how many pending
-     * connections the kernel will queue before refusing new ones.
-     */
     if (listen(fd, 5) < 0)
     {
         HK_ERR("listen() failed: %s", strerror(errno));
@@ -79,12 +81,8 @@ static int _setup_socket(void)
     return fd;
 }
 
-/*
- * Handle a single client request.
- * Called once per accepted connection.
- *
- * Reads one hk_request_t, dispatches it, sends back hk_response_t.
- */
+/* ── client handler ──────────────────────────────────────────── */
+
 static void _handle_client(int client_fd)
 {
     hk_request_t req;
@@ -93,24 +91,17 @@ static void _handle_client(int client_fd)
     memset(&req, 0, sizeof(req));
     memset(&resp, 0, sizeof(resp));
 
-    /* Read the full request struct */
     if (hk_recv(client_fd, &req, sizeof(req)) < 0)
     {
-        HK_ERR("failed to read request from client");
+        HK_ERR("failed to read request");
         return;
     }
 
-    /* Dispatch based on command type */
     switch (req.type)
     {
 
     case HK_CMD_RUN:
     {
-        /*
-         * Build a NULL-terminated argv array from the request.
-         * req.argv is a 2D array of strings — we need a char*[]
-         * for execvp().
-         */
         char *argv[HK_MAX_ARGS + 1];
         for (int i = 0; i < req.argc && i < HK_MAX_ARGS; i++)
             argv[i] = req.argv[i];
@@ -119,6 +110,11 @@ static void _handle_client(int client_fd)
         int id = hk_container_run(req.name, argv, req.priority);
         if (id > 0)
         {
+            /*
+             * Tell the scheduler about the new container.
+             * It will add it to the run queue immediately.
+             */
+            hk_scheduler_add(id);
             resp.status = 0;
             snprintf(resp.message, sizeof(resp.message),
                      "container [%d] '%s' started", id, req.name);
@@ -134,29 +130,19 @@ static void _handle_client(int client_fd)
 
     case HK_CMD_PS:
     {
-        /*
-         * ps output goes to stdout normally, but here we need
-         * to capture it into resp.message to send back to client.
-         *
-         * We use a trick: redirect stdout to a memstream
-         * temporarily, capture the output, then restore stdout.
-         */
         hk_container_reap();
 
-        /* Build ps output as a string */
         char *buf = NULL;
         size_t size = 0;
         FILE *mem = open_memstream(&buf, &size);
 
         if (mem)
         {
-            /* Temporarily redirect stdout */
-            FILE *old_stdout = stdout;
+            FILE *old = stdout;
             stdout = mem;
             hk_container_ps();
-            stdout = old_stdout;
+            stdout = old;
             fclose(mem);
-
             strncpy(resp.message, buf, sizeof(resp.message) - 1);
             free(buf);
         }
@@ -165,7 +151,6 @@ static void _handle_client(int client_fd)
             strncpy(resp.message, "(ps failed)",
                     sizeof(resp.message) - 1);
         }
-
         resp.status = 0;
         break;
     }
@@ -175,6 +160,11 @@ static void _handle_client(int client_fd)
         hk_rc_t rc = hk_container_kill(req.kill_id);
         if (rc == HK_OK)
         {
+            /*
+             * Remove from scheduler queue so it stops
+             * getting ticks and we stop sending it signals.
+             */
+            hk_scheduler_remove(req.kill_id);
             resp.status = 0;
             snprintf(resp.message, sizeof(resp.message),
                      "container [%d] killed", req.kill_id);
@@ -191,37 +181,40 @@ static void _handle_client(int client_fd)
     default:
         resp.status = 1;
         snprintf(resp.message, sizeof(resp.message),
-                 "unknown command type %d", req.type);
+                 "unknown command %d", req.type);
         break;
     }
 
-    /* Send the response back */
     hk_send(client_fd, &resp, sizeof(resp));
 }
 
-/*
- * _daemon_loop — the infinite accept() loop
- *
- * This runs forever in the child process after fork().
- * Each iteration: accept a client, handle it, close it.
- */
+/* ── daemon loop ─────────────────────────────────────────────── */
+
 static void _daemon_loop(int listen_fd)
 {
+    /*
+     * Spawn the scheduler thread.
+     * It runs independently, firing ticks every HK_TICK_MS ms.
+     * The main thread stays here in the accept() loop.
+     */
+    pthread_t sched_thread;
+    if (pthread_create(&sched_thread, NULL, _scheduler_thread, NULL) != 0)
+    {
+        HK_ERR("failed to create scheduler thread");
+        return;
+    }
+    HK_INFO("scheduler thread started");
+
     HK_OK("daemon listening on %s", HK_SOCKET_PATH);
     HK_INFO("waiting for commands...");
 
     while (1)
     {
-        /*
-         * accept() blocks here until a client connects.
-         * Returns a NEW fd specific to that client connection.
-         * The original listen_fd stays open for future clients.
-         */
         int client_fd = accept(listen_fd, NULL, NULL);
         if (client_fd < 0)
         {
             if (errno == EINTR)
-                continue; /* interrupted by signal, retry */
+                continue;
             HK_ERR("accept() failed: %s", strerror(errno));
             continue;
         }
@@ -231,17 +224,15 @@ static void _daemon_loop(int listen_fd)
     }
 }
 
-/* ── public API */
+/* ── public API ──────────────────────────────────────────────── */
 
 int hk_daemon_start(void)
 {
-    /* Check if daemon is already running */
     struct stat st;
     if (stat(HK_SOCKET_PATH, &st) == 0)
     {
-        HK_WARN("socket already exists at %s", HK_SOCKET_PATH);
         HK_WARN("daemon may already be running");
-        HK_WARN("if not, remove it with: rm %s", HK_SOCKET_PATH);
+        HK_WARN("if not: rm %s", HK_SOCKET_PATH);
         return 1;
     }
 
@@ -249,16 +240,7 @@ int hk_daemon_start(void)
     if (listen_fd < 0)
         return -1;
 
-    /*
-     * Fork — split into two processes.
-     *
-     * fork() returns:
-     *   >0  we are the PARENT — got the child's pid
-     *    0  we are the CHILD
-     *   -1  error
-     */
     pid_t pid = fork();
-
     if (pid < 0)
     {
         HK_ERR("fork() failed: %s", strerror(errno));
@@ -268,39 +250,24 @@ int hk_daemon_start(void)
 
     if (pid > 0)
     {
-        /*
-         * PARENT — print success and exit.
-         * Terminal gets control back immediately.
-         * The child (daemon) keeps running in background.
-         */
+        /* Parent — return to terminal immediately */
         HK_OK("daemon started  (pid=%d)", pid);
         HK_INFO("socket: %s", HK_SOCKET_PATH);
         close(listen_fd);
         return 0;
     }
 
-    /*
-     * CHILD — we are the daemon now.
-     * Detach from the terminal session so we don't die
-     * when the user closes their terminal.
-     */
+    /* Child — we are the daemon */
     setsid();
-
-    /* Initialise the container subsystem inside the daemon */
     hk_container_init();
-
-    /* Enter the infinite accept loop — never returns */
+    hk_scheduler_init(HK_SCHED_PRIORITY); /* use priority scheduling */
     _daemon_loop(listen_fd);
 
-    return 0; /* unreachable */
+    return 0;
 }
 
 int hk_client_send(const hk_request_t *req, hk_response_t *resp)
 {
-    /*
-     * Create a client socket and connect to the daemon.
-     * Same address family and type as the server.
-     */
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0)
     {
@@ -315,19 +282,17 @@ int hk_client_send(const hk_request_t *req, hk_response_t *resp)
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
-        HK_ERR("cannot connect to daemon at %s", HK_SOCKET_PATH);
-        HK_ERR("is the daemon running? try: sudo ./build/hollowkernel daemon");
+        HK_ERR("cannot connect to daemon");
+        HK_ERR("is it running?  sudo ./build/hollowkernel daemon");
         close(fd);
         return -1;
     }
 
-    /* Send request, receive response */
     if (hk_send(fd, req, sizeof(*req)) < 0)
     {
         close(fd);
         return -1;
     }
-
     if (hk_recv(fd, resp, sizeof(*resp)) < 0)
     {
         close(fd);

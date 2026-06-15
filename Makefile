@@ -31,7 +31,7 @@ all: $(BUILD)/$(TARGET)
 # Link all object files into the final binary
 $(BUILD)/$(TARGET): $(OBJS)
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CC) $(CFLAGS) $^ -o $@ -lpthread
 	@echo ""
 	@echo "  ✓  built → $(BUILD)/$(TARGET)"
 	@echo ""
