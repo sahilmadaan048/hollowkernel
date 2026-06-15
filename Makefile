@@ -1,11 +1,9 @@
-# ================================================================
 #  hollowkernel — Makefile
 #
 #  Usage:
 #    make          → build the binary
 #    make clean    → remove build artifacts
 #    make run      → build + run with no args (shows usage)
-# ================================================================
 
 CC      := gcc
 CFLAGS  := -Wall -Wextra -std=c11 -g \
@@ -16,11 +14,9 @@ TARGET  := hollowkernel
 BUILD   := build
 
 # ── sources & objects ──────────────────────────────────────────
-#
 # find all .c files under src/ automatically.
 # When we add scheduler/, ipc/ etc. later they get picked up
 # without any changes to this Makefile.
-#
 SRCS := $(shell find src -name '*.c')
 
 # Transform: src/foo/bar.c → build/foo/bar.o
