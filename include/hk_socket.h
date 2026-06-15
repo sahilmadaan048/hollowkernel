@@ -13,7 +13,6 @@
  * We use fixed-size structs and send raw bytes — no parsing needed.
  */
 
-#include <iostream>
 #include <stdint.h>
 
 /* Path to the Unix domain socket file.
