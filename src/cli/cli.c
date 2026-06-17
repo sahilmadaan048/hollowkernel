@@ -13,6 +13,7 @@
 #include "hk_daemon.h"
 #include "hk_socket.h"
 #include "hk_log.h"
+#include "hk_ipc.h"
 
 /* ── static handlers  */
 
@@ -108,6 +109,44 @@ static int _cmd_ps(void)
     return resp.status;
 }
 
+static int _cmd_shm_write(int argc, char *argv[])
+{
+    if (argc < 3)
+    {
+        HK_ERR("usage: shm-write <name> <data>");
+        return 1;
+    }
+
+    const char *name = argv[1];
+    const char *data = argv[2];
+
+    /* +1 to include the null terminator so shm-read gets a valid string back */
+    if (hk_shm_write(name, data, strlen(data) + 1) < 0)
+        return 1;
+
+    return 0;
+}
+
+static int _cmd_shm_read(int argc, char *argv[])
+{
+    if (argc < 2)
+    {
+        HK_ERR("usage: shm-read <name>");
+        return 1;
+    }
+
+    const char *name = argv[1];
+    char buf[HK_SHM_MAX_SIZE];
+    memset(buf, 0, sizeof(buf));
+
+    int n = hk_shm_read(name, buf, sizeof(buf));
+    if (n < 0)
+        return 1;
+
+    printf("  → %s\n", buf);
+    return 0;
+}
+
 static int _cmd_kill(int argc, char *argv[])
 {
     if (argc < 2)
@@ -189,7 +228,10 @@ int hk_cli_dispatch(int argc, char *argv[])
         return _cmd_ps();
     if (strcmp(cmd, "kill") == 0)
         return _cmd_kill(argc - 1, argv + 1);
-
+    if (strcmp(cmd, "shm-write") == 0)
+        return _cmd_shm_write(argc - 1, argv + 1);
+    if (strcmp(cmd, "shm-read") == 0)
+        return _cmd_shm_read(argc - 1, argv + 1);
     if (strcmp(cmd, "help") == 0 ||
         strcmp(cmd, "--help") == 0)
     {
