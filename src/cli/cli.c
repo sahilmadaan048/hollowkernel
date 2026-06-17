@@ -14,6 +14,7 @@
 #include "hk_socket.h"
 #include "hk_log.h"
 #include "hk_ipc.h"
+#include "hk_msgqueue.h"
 
 /* ── static handlers  */
 
@@ -147,6 +148,49 @@ static int _cmd_shm_read(int argc, char *argv[])
     return 0;
 }
 
+static int _cmd_mq_send(int argc, char *argv[])
+{
+    if (argc < 3)
+    {
+        HK_ERR("usage: mq-send <name> <message> [priority 0-31]");
+        return 1;
+    }
+
+    /* Queue names must start with '/' per POSIX convention */
+    char qname[64];
+    snprintf(qname, sizeof(qname), "/%s", argv[1]);
+
+    const char *msg = argv[2];
+    unsigned int priority = (argc >= 4) ? (unsigned int)atoi(argv[3]) : 0;
+
+    if (hk_mq_send(qname, msg, strlen(msg) + 1, priority) < 0)
+        return 1;
+
+    return 0;
+}
+
+static int _cmd_mq_receive(int argc, char *argv[])
+{
+    if (argc < 2)
+    {
+        HK_ERR("usage: mq-receive <name>");
+        return 1;
+    }
+
+    char qname[64];
+    snprintf(qname, sizeof(qname), "/%s", argv[1]);
+
+    char buf[HK_MQ_MAX_MSG_SIZE];
+    memset(buf, 0, sizeof(buf));
+
+    int n = hk_mq_receive(qname, buf, sizeof(buf));
+    if (n < 0)
+        return 1;
+
+    printf("  → %s\n", buf);
+    return 0;
+}
+
 static int _cmd_kill(int argc, char *argv[])
 {
     if (argc < 2)
@@ -232,6 +276,10 @@ int hk_cli_dispatch(int argc, char *argv[])
         return _cmd_shm_write(argc - 1, argv + 1);
     if (strcmp(cmd, "shm-read") == 0)
         return _cmd_shm_read(argc - 1, argv + 1);
+    if (strcmp(cmd, "mq-send") == 0)
+        return _cmd_mq_send(argc - 1, argv + 1);
+    if (strcmp(cmd, "mq-receive") == 0)
+        return _cmd_mq_receive(argc - 1, argv + 1);
     if (strcmp(cmd, "help") == 0 ||
         strcmp(cmd, "--help") == 0)
     {
