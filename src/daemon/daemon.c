@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <fcntl.h>   /* open(), O_CREAT, O_WRONLY, O_APPEND */
 
 #include "hk_daemon.h"
 #include "hk_container.h"
@@ -261,6 +262,22 @@ int hk_daemon_start(void)
 
     /* Child — we are the daemon */
     setsid();
+
+    /*
+     * Redirect stdout/stderr to a log file. Without this, any
+     * output from the daemon (and from cloned containers, which
+     * inherit these same fds) effectively disappears once we've
+     * detached from the controlling terminal.
+     */
+    int log_fd = open("/tmp/hollowkernel.log",
+                      O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (log_fd >= 0)
+    {
+        dup2(log_fd, STDOUT_FILENO);
+        dup2(log_fd, STDERR_FILENO);
+        close(log_fd);
+    }
+
     hk_container_init();
     hk_scheduler_init(HK_SCHED_PRIORITY); /* use priority scheduling */
     _daemon_loop(listen_fd);
