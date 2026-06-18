@@ -22,14 +22,16 @@ static int _cmd_run(int argc, char *argv[])
 {
     if (argc < 2)
     {
-        HK_ERR("usage: run <name> [priority 0-9] -- <cmd> [args...]");
+        HK_ERR("usage: run <name> [priority 0-9] [--rootfs <path>] -- <cmd> [args...]");
         return 1;
     }
 
     const char *name = argv[1];
     int priority = 5;
+    const char *rootfs = NULL;
     int sep_idx = -1;
 
+    /* Find "--" separator first — everything after it is the cmd */
     for (int i = 2; i < argc; i++)
     {
         if (strcmp(argv[i], "--") == 0)
@@ -45,13 +47,25 @@ static int _cmd_run(int argc, char *argv[])
         return 1;
     }
 
-    if (sep_idx == 3)
+    /*
+     * Scan everything between name and "--" for optional flags
+     * and a bare priority number.
+     */
+    for (int i = 2; i < sep_idx; i++)
     {
-        priority = atoi(argv[2]);
-        if (priority < 0 || priority > 9)
+        if (strcmp(argv[i], "--rootfs") == 0 && i + 1 < sep_idx)
         {
-            HK_ERR("priority must be 0-9, got '%s'", argv[2]);
-            return 1;
+            rootfs = argv[i + 1];
+            i++; /* skip the value we just consumed */
+        }
+        else
+        {
+            priority = atoi(argv[i]);
+            if (priority < 0 || priority > 9)
+            {
+                HK_ERR("priority must be 0-9, got '%s'", argv[i]);
+                return 1;
+            }
         }
     }
 
@@ -69,7 +83,9 @@ static int _cmd_run(int argc, char *argv[])
     req.priority = priority;
     strncpy(req.name, name, sizeof(req.name) - 1);
 
-    /* Copy argv into the fixed 2D array */
+    if (rootfs != NULL)
+        strncpy(req.rootfs, rootfs, sizeof(req.rootfs) - 1);
+
     int i = 0;
     while (cmd[i] && i < HK_MAX_ARGS)
     {
