@@ -31,7 +31,7 @@ void hk_container_init(void);
  * Internally this calls clone() with namespace flags — not fork().
  * That's the key difference from a normal process spawn.
  */
-int hk_container_run(const char *name, char *const cmd[], int priority);
+int hk_container_run(const char *name, char *const cmd[], int priority, const char *rootfs);
 
 /*
  * Send SIGKILL to the container with the given id.

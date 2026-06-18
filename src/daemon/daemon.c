@@ -107,7 +107,9 @@ static void _handle_client(int client_fd)
             argv[i] = req.argv[i];
         argv[req.argc] = NULL;
 
-        int id = hk_container_run(req.name, argv, req.priority);
+        /* Empty rootfs string means "no isolation" — pass NULL */
+        const char *rootfs = (req.rootfs[0] != '\0') ? req.rootfs : NULL;
+        int id = hk_container_run(req.name, argv, req.priority, rootfs);
         if (id > 0)
         {
             /*

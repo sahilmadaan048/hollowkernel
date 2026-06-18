@@ -1,10 +1,10 @@
 /*
-* container.c — process isolation via Linux namespaces
-*
-* Core idea: instead of fork(), we use clone() with namespace flags.
-* This gives each container its own isolated view of PIDs, hostname,
-* and mounts — the same primitives Docker is built on.
-*/
+ * container.c — process isolation via Linux namespaces
+ *
+ * Core idea: instead of fork(), we use clone() with namespace flags.
+ * This gives each container its own isolated view of PIDs, hostname,
+ * and mounts — the same primitives Docker is built on.
+ */
 #include <sched.h>  /* clone(), CLONE_NEW*               */
 #include <signal.h> /* SIGKILL, SIGCHLD                  */
 #include <stdio.h>
@@ -14,16 +14,14 @@
 #include <sys/wait.h> /* waitpid(), WNOHANG                */
 #include <unistd.h>   /* execvp(), sethostname()           */
 #include <errno.h>
-
 #include "hk_container.h"
 #include "hk_log.h"
 
-
 /* ── container table ─────────────────────────────────────────
-*
-* A flat array of descriptors. Simple and cache-friendly.
-* Slots with state == HK_STATE_EMPTY are free to reuse.
-*
+ *
+ * A flat array of descriptors. Simple and cache-friendly.
+ * Slots with state == HK_STATE_EMPTY are free to reuse.
+ *
  * Static = private to this file. Nobody outside can touch
  * this array directly — they go through our API functions.
  * ─────────────────────────────────────────────────────────── */
@@ -47,30 +45,57 @@ typedef struct
 {
     char *const *cmd; /* argv[] for execvp — NULL terminated */
     const char *name; /* becomes the container's hostname    */
+    const char *rootfs;
 } _child_args_t;
 
 static int _container_entry(void *arg)
 {
     _child_args_t *a = (_child_args_t *)arg;
 
-    /*
-     * We're now inside the new UTS namespace.
-     * Set the hostname to the container name so it's
-     * visible if you run `hostname` inside the container.
-     */
+    /* Give the UTS namespace a hostname matching the container name. */
     if (sethostname(a->name, strlen(a->name)) < 0)
-        perror("sethostname"); /* non-fatal, keep going */
+        perror("sethostname");
 
     /*
-     * Replace this process image with the requested command.
-     * execvp searches PATH automatically (the 'p' in execvp).
-     * If this succeeds it never returns.
-     * If it fails, we fall through and return 127 (standard
-     * "command not found" exit code).
+     * ── VFS isolation via chroot() ──
+     *
+     * chroot() changes what THIS process (and its descendants)
+     * consider to be "/". After this call, any path the process
+     * opens is resolved relative to a->rootfs instead of the
+     * real filesystem root.
+     *
+     * Note: a determined process with enough privileges can
+     * technically escape a chroot jail (e.g. via fchdir tricks
+     * with an open fd to the real root). Real container runtimes
+     * use pivot_root() + dropping capabilities to close this gap.
+     * We use chroot() here because the concept is identical and
+     * far simpler to learn from.
      */
+    if (a->rootfs != NULL)
+    {
+        if (chroot(a->rootfs) < 0)
+        {
+            perror("chroot");
+            return 126;
+        }
+
+        /*
+         * CRITICAL: chroot() does NOT change the current working
+         * directory. Without this chdir, relative paths inside
+         * the container would still resolve against the OLD cwd,
+         * which no longer makes sense from inside the jail.
+         */
+        if (chdir("/") < 0)
+        {
+            perror("chdir");
+            return 126;
+        }
+    }
+
+    /* exec the requested command. */
     execvp(a->cmd[0], a->cmd);
 
-    /* execvp only returns on failure */
+    /* If we reach here execvp failed. */
     perror("execvp");
     return 127;
 }
@@ -83,7 +108,7 @@ void hk_container_init(void)
     HK_INFO("container table ready (capacity: %d)", HK_MAX_CONTAINERS);
 }
 
-int hk_container_run(const char *name, char *const cmd[], int priority)
+int hk_container_run(const char *name, char *const cmd[], int priority, const char *rootfs)
 {
     /* ── 1. find a free slot ── */
     hk_container_t *slot = NULL;
@@ -119,7 +144,7 @@ int hk_container_run(const char *name, char *const cmd[], int priority)
     _child_args_t cargs = {
         .cmd = cmd,
         .name = name,
-    };
+        .rootfs = rootfs};
 
     /*
      * ── 4. clone() — the key syscall ──
@@ -154,7 +179,10 @@ int hk_container_run(const char *name, char *const cmd[], int priority)
     slot->mem_bytes = 0;
     slot->cpu_ticks = 0;
     strncpy(slot->name, name, HK_NAME_MAX - 1);
-    strncpy(slot->rootfs, "/", sizeof(slot->rootfs) - 1);
+    if (rootfs != NULL)
+        strncpy(slot->rootfs, rootfs, sizeof(slot->rootfs) - 1);
+    else
+        strncpy(slot->rootfs, "/", sizeof(slot->rootfs) - 1);
 
     HK_OK("container [%d] '%s' started  pid=%-6d  priority=%d",
           slot->id, slot->name, slot->pid, slot->priority);

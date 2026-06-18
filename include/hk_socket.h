@@ -44,12 +44,13 @@ typedef enum
  *  */
 typedef struct
 {
-    hk_cmd_type_t type;                 /* which command       */
-    char name[64];                      /* container name      */
-    int priority;                       /* 0-9                 */
-    int kill_id;                        /* used by CMD_KILL    */
-    int argc;                           /* number of cmd args  */
-    char argv[HK_MAX_ARGS][HK_ARG_MAX]; /* the command + args  */
+    hk_cmd_type_t type;
+    char name[64];
+    int priority;
+    int kill_id;
+    int argc;
+    char argv[HK_MAX_ARGS][HK_ARG_MAX];
+    char rootfs[256]; /* path to chroot into, empty = none */
 } hk_request_t;
 
 /* response struct
